@@ -295,9 +295,15 @@ jobs:
       - name: Archive portable environment
         run: |
           $date = Get-Date -Format "yyyyMMdd"
-          $archiveName = "LadaTrainer_cu${{ env.CUDA_VERSION }}_$date.zip"
-          Compress-Archive -Path "LadaTrainer" -DestinationPath $archiveName
-          Write-Host "Created archive: $archiveName"
+          $archiveName = "LadaTrainer_cu${{ env.CUDA_VERSION }}_$date"
+          Write-Host "Creating split archive: $archiveName.7z.001, $archiveName.7z.002, ..."
+          
+          # 使用 7z 分卷压缩，每卷 1.5GB（确保每个文件 < 2GB）
+          7z a -t7z -mx=1 -v1500m "${archiveName}.7z" LadaTrainer
+          
+          # 列出生成的文件
+          Get-ChildItem -Filter "${archiveName}.7z.*" | ForEach-Object { Write-Host "Created: $($_.Name) ($([math]::Round($_.Length/1MB, 2)) MB)" }
+          
           echo "ARCHIVE_NAME=$archiveName" >> $env:GITHUB_ENV
 
       - name: Upload artifact
@@ -305,7 +311,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: LadaTrainer-cu${{ env.CUDA_VERSION }}
-          path: LadaTrainer_cu${{ env.CUDA_VERSION }}_*.zip
+          path: LadaTrainer_cu${{ env.CUDA_VERSION }}_*.7z
           retention-days: 30
 
       - name: Create summary
