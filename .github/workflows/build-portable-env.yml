@@ -72,10 +72,13 @@ jobs:
 
       - name: Install mmcv
         id: install-mmcv
+        env:
+          PIP_NO_BUILD_ISOLATION: "1"
         run: |
           echo "Attempting to install mmcv from pre-built wheels..."
           pip install mmcv==${{ env.MMCV_VERSION }} `
-               -f https://download.openmmlab.com/mmcv/dist/cu${{ env.CUDA_VERSION }}/torch${{ env.TORCH_VERSION }}/index.html
+               -f https://download.openmmlab.com/mmcv/dist/cu${{ env.CUDA_VERSION }}/torch${{ env.TORCH_VERSION }}/index.html `
+               --no-build-isolation
         continue-on-error: true
 
       - name: Build mmcv from source
@@ -311,7 +314,8 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: LadaTrainer-cu${{ env.CUDA_VERSION }}
-          path: LadaTrainer_cu${{ env.CUDA_VERSION }}_*.7z
+          path: |
+            ${{ env.ARCHIVE_NAME }}.7z.*
           retention-days: 30
 
       - name: Create summary
