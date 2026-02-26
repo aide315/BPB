@@ -82,6 +82,7 @@ jobs:
         run: |
           echo "Pre-built mmcv not available, building from source..."
           choco install cmake -y
+          pip install setuptools wheel
           pip install mmcv==${{ env.MMCV_VERSION }} --no-binary mmcv
 
       - name: Install core dependencies
