@@ -1,0 +1,316 @@
+name: Build Portable Environment (CUDA 12.8)
+
+on:
+  push:
+    branches: [main, master]
+    paths:
+      - 'requirements.txt'
+      - 'pyproject.toml'
+      - '.github/workflows/build-portable-env.yml'
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+    inputs:
+      upload_artifact:
+        description: 'Upload as artifact (keep for 30 days)'
+        required: false
+        default: true
+        type: boolean
+
+env:
+  PYTHON_VERSION: '3.10.11'
+  TORCH_VERSION: '2.8.0'
+  TORCHVISION_VERSION: '0.23.0'
+  TORCHAUDIO_VERSION: '2.8.0'
+  CUDA_VERSION: '128'
+  MMCV_VERSION: '2.2.0'
+  NUMPY_VERSION: '1.26.4'
+  OPENCV_VERSION: '4.9.0.80'
+  ULTRALYTICS_VERSION: '8.3.203'
+  MMENGINE_VERSION: '0.10.7'
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 180
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Display Python info
+        run: |
+          python --version
+          python -c "import sys; print(f'Python path: {sys.executable}')"
+
+      - name: Cache pip packages
+        uses: actions/cache@v4
+        id: cache-pip
+        with:
+          path: ~\AppData\Local\pip\Cache
+          key: ${{ runner.os }}-pip-cu${{ env.CUDA_VERSION }}-torch${{ env.TORCH_VERSION }}-${{ hashFiles('pyproject.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-cu${{ env.CUDA_VERSION }}-torch${{ env.TORCH_VERSION }}-
+            ${{ runner.os }}-pip-cu${{ env.CUDA_VERSION }}-
+
+      - name: Upgrade pip
+        run: |
+          python -m pip install --upgrade pip setuptools wheel
+
+      - name: Install PyTorch with CUDA ${{ env.CUDA_VERSION }}
+        run: |
+          pip install torch==${{ env.TORCH_VERSION }}+cu${{ env.CUDA_VERSION }} `
+                       torchvision==${{ env.TORCHVISION_VERSION }}+cu${{ env.CUDA_VERSION }} `
+                       torchaudio==${{ env.TORCHAUDIO_VERSION }}+cu${{ env.CUDA_VERSION }} `
+                       --index-url https://download.pytorch.org/whl/cu${{ env.CUDA_VERSION }}
+
+      - name: Install mmcv
+        id: install-mmcv
+        run: |
+          echo "Attempting to install mmcv from pre-built wheels..."
+          pip install mmcv==${{ env.MMCV_VERSION }} `
+               -f https://download.openmmlab.com/mmcv/dist/cu${{ env.CUDA_VERSION }}/torch${{ env.TORCH_VERSION }}/index.html
+        continue-on-error: true
+
+      - name: Build mmcv from source
+        if: steps.install-mmcv.outcome == 'failure'
+        run: |
+          echo "Pre-built mmcv not available, building from source..."
+          choco install cmake -y
+          pip install mmcv==${{ env.MMCV_VERSION }} --no-binary mmcv
+
+      - name: Install core dependencies
+        run: |
+          pip install "numpy==${{ env.NUMPY_VERSION }}" `
+                       "opencv-python==${{ env.OPENCV_VERSION }}" `
+                       "opencv-python-headless==${{ env.OPENCV_VERSION }}" `
+                       "opencv-contrib-python==${{ env.OPENCV_VERSION }}" `
+                       pillow
+
+      - name: Install ML dependencies
+        run: |
+          pip install ultralytics==${{ env.ULTRALYTICS_VERSION }} `
+                       mmengine==${{ env.MMENGINE_VERSION }} `
+                       mmagic `
+                       albumentations `
+                       tensorboard
+
+      - name: Install dataset creation dependencies
+        run: |
+          pip install timm einops lap scipy onnx onnxruntime-gpu av
+
+      - name: Install GUI and utility dependencies
+        run: |
+          pip install PyQt6 requests tqdm psutil labelme
+
+      - name: Apply patches
+        shell: pwsh
+        run: |
+          $sitePackages = python -c "import site; print(site.getsitepackages()[0])"
+          Write-Host "Site-packages: $sitePackages"
+          
+          $patches = @(
+            "patches/adjust_mmengine_resume_dataloader.patch",
+            "patches/remove_ultralytics_telemetry.patch", 
+            "patches/fix_loading_mmengine_weights_on_torch26_and_higher.diff"
+          )
+          
+          foreach ($patch in $patches) {
+            $fullPath = Join-Path $PWD $patch
+            if (Test-Path $fullPath) {
+              Write-Host "Applying patch: $patch"
+              patch -u -p1 -d $sitePackages -i $fullPath 2>$null
+              if ($LASTEXITCODE -eq 0) {
+                Write-Host "Successfully applied: $patch"
+              } else {
+                Write-Host "Patch already applied or failed: $patch"
+              }
+            } else {
+              Write-Host "Patch file not found: $patch"
+            }
+          }
+
+      - name: Verify installation
+        run: |
+          Write-Host "=== Installation Verification ===" -ForegroundColor Green
+          python -c "import torch; print(f'torch: {torch.__version__}'); print(f'CUDA: {torch.version.cuda}'); print(f'CUDA available: {torch.cuda.is_available()}')"
+          python -c "import torchvision; print(f'torchvision: {torchvision.__version__}')"
+          python -c "import mmcv; print(f'mmcv: {mmcv.__version__}')"
+          python -c "import numpy; print(f'numpy: {numpy.__version__}')"
+          python -c "import cv2; print(f'opencv: {cv2.__version__}')"
+          python -c "import ultralytics; print(f'ultralytics: {ultralytics.__version__}')"
+          Write-Host "=== All packages installed successfully ===" -ForegroundColor Green
+
+      - name: Create portable environment
+        shell: pwsh
+        run: |
+          $pythonDir = python -c "import sys; print(sys.prefix)"
+          $targetDir = "LadaTrainer\_internal"
+          
+          Write-Host "Creating portable environment..."
+          Write-Host "Source: $pythonDir"
+          Write-Host "Target: $targetDir"
+          
+          New-Item -ItemType Directory -Path $targetDir -Force | Out-Null
+          Copy-Item -Path "$pythonDir\*" -Destination $targetDir -Recurse -Force
+          
+          if (Test-Path "$targetDir\pyvenv.cfg") { 
+            Remove-Item "$targetDir\pyvenv.cfg" -Force 
+          }
+
+      - name: Copy project files
+        shell: pwsh
+        run: |
+          $dirs = @("scripts", "configs", "lada", "patches")
+          foreach ($dir in $dirs) {
+            if (Test-Path $dir) {
+              Copy-Item -Path $dir -Destination "LadaTrainer\$dir" -Recurse -Force
+              Write-Host "Copied: $dir"
+            }
+          }
+          
+          $files = @("requirements.txt", "pyproject.toml", "LICENSE.md", "README.md")
+          foreach ($file in $files) {
+            if (Test-Path $file) {
+              Copy-Item -Path $file -Destination "LadaTrainer\$file" -Force
+              Write-Host "Copied: $file"
+            }
+          }
+          
+          New-Item -ItemType Directory -Path "LadaTrainer\model_weights" -Force | Out-Null
+          New-Item -ItemType Directory -Path "LadaTrainer\logs" -Force | Out-Null
+          New-Item -ItemType Directory -Path "LadaTrainer\work_dirs" -Force | Out-Null
+          New-Item -ItemType Directory -Path "LadaTrainer\config" -Force | Out-Null
+
+      - name: Create version file
+        shell: pwsh
+        run: |
+          $versionInfo = @{
+            build_date = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+            python_version = "${{ env.PYTHON_VERSION }}"
+            torch_version = "${{ env.TORCH_VERSION }}"
+            cuda_version = "${{ env.CUDA_VERSION }}"
+            mmcv_version = "${{ env.MMCV_VERSION }}"
+            numpy_version = "${{ env.NUMPY_VERSION }}"
+            opencv_version = "${{ env.OPENCV_VERSION }}"
+            ultralytics_version = "${{ env.ULTRALYTICS_VERSION }}"
+            supported_gpus = @("RTX 30 Series", "RTX 40 Series", "RTX 50 Series")
+            github_run_id = "${{ github.run_id }}"
+            github_sha = "${{ github.sha }}"
+          }
+          $versionInfo | ConvertTo-Json -Depth 3 | Out-File "LadaTrainer\version.json" -Encoding utf8
+
+      - name: Create activation script
+        shell: pwsh
+        run: |
+          @'
+          @echo off
+          chcp 65001 >nul 2>&1
+          title LadaTrainer Environment
+          
+          echo ========================================
+          echo   LadaTrainer Portable Environment
+          echo   CUDA 12.8 / PyTorch 2.8.0
+          echo ========================================
+          echo.
+          
+          set "PYTHON_EXE=%~dp0_internal\python.exe"
+          
+          if not exist "%PYTHON_EXE%" (
+              echo [ERROR] Python not found at: %PYTHON_EXE%
+              pause
+              exit /b 1
+          )
+          
+          echo Python: %PYTHON_EXE%
+          echo.
+          echo Usage:
+          echo   %PYTHON_EXE% your_script.py
+          echo.
+          echo Or add to PATH:
+          echo   set "PATH=%~dp0_internal;%PATH%"
+          echo.
+          
+          "%PYTHON_EXE%" --version
+          "%PYTHON_EXE%" -c "import torch; print(f'PyTorch: {torch.__version__}'); print(f'CUDA: {torch.version.cuda}')"
+          
+          echo.
+          pause
+          '@ | Out-File "LadaTrainer\activate.bat" -Encoding ascii
+
+      - name: Create README for release
+        shell: pwsh
+        run: |
+          @'
+          # LadaTrainer Portable Environment
+          
+          ## System Requirements
+          
+          - Windows 10/11 64-bit
+          - NVIDIA GPU (RTX 30/40/50 Series)
+          - NVIDIA Driver >= 550.00
+          
+          ## Included Components
+          
+          - Python 3.10.11
+          - PyTorch 2.8.0 + CUDA 12.8
+          - mmcv 2.2.0
+          - numpy 1.26.4
+          - opencv-python 4.9.0.80
+          - ultralytics 8.3.203
+          
+          ## Quick Start
+          
+          1. Extract the archive
+          2. Run `activate.bat` to verify environment
+          3. Run your training scripts:
+          
+          ```batch
+          _internal\python.exe scripts\training\train-mosaic-restoration-basicvsrpp.py configs\basicvsrpp\mosaic_restoration_generic_stage1.py
+          ```
+          
+          ## Model Weights
+          
+          Download required model weights from:
+          - https://huggingface.co/ladaapp/lada
+          
+          Place them in the `model_weights` directory.
+          
+          ## Support
+          
+          - GitHub: https://github.com/your-repo/lada
+          - Issues: https://github.com/your-repo/lada/issues
+          
+          '@ | Out-File "LadaTrainer\README_PORTABLE.md" -Encoding utf8
+
+      - name: Archive portable environment
+        run: |
+          $date = Get-Date -Format "yyyyMMdd"
+          $archiveName = "LadaTrainer_cu${{ env.CUDA_VERSION }}_$date.zip"
+          Compress-Archive -Path "LadaTrainer" -DestinationPath $archiveName
+          Write-Host "Created archive: $archiveName"
+          echo "ARCHIVE_NAME=$archiveName" >> $env:GITHUB_ENV
+
+      - name: Upload artifact
+        if: inputs.upload_artifact != false
+        uses: actions/upload-artifact@v4
+        with:
+          name: LadaTrainer-cu${{ env.CUDA_VERSION }}
+          path: LadaTrainer_cu${{ env.CUDA_VERSION }}_*.zip
+          retention-days: 30
+
+      - name: Create summary
+        run: |
+          Write-Host "========================================"
+          Write-Host "Build completed successfully!"
+          Write-Host "========================================"
+          Write-Host "Archive: ${{ env.ARCHIVE_NAME }}"
+          Write-Host "Python: ${{ env.PYTHON_VERSION }}"
+          Write-Host "PyTorch: ${{ env.TORCH_VERSION }}"
+          Write-Host "CUDA: ${{ env.CUDA_VERSION }}"
+          Write-Host "========================================"
