@@ -310,12 +310,11 @@ jobs:
           echo "ARCHIVE_NAME=$archiveName" >> $env:GITHUB_ENV
 
       - name: Upload artifact
-        if: inputs.upload_artifact != false
         uses: actions/upload-artifact@v4
         with:
           name: LadaTrainer-cu${{ env.CUDA_VERSION }}
           path: |
-            ${{ env.ARCHIVE_NAME }}.7z.*
+            LadaTrainer_cu${{ env.CUDA_VERSION }}_*.7z.*
           retention-days: 30
 
       - name: Create summary
